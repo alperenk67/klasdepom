@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Depo">
+<meta name="theme-color" content="#f2f3f7">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png">
+<title>Depo Takip</title>
+<style>
+:root{--bg:#f2f3f7;--card:#fff;--text:#111827;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb;--ok:#16a34a;--err:#dc2626;--warn:#d97706;--mode:var(--err)}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0f17;--card:#161b26;--text:#f3f4f6;--muted:#9ca3af;--line:#262c3a}}
+body[data-mode=stock]{--mode:var(--ok)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+[hidden]{display:none!important}
+html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif}
+body{padding-top:env(safe-area-inset-top);padding-bottom:calc(70px + env(safe-area-inset-bottom))}
+.top{position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 16px 6px}
+.top h1{margin:0;font-size:28px}
+main{padding:0 16px 16px}
+.tab{display:none}.tab.active{display:block}
+.tabs{position:fixed;left:0;right:0;bottom:0;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom);z-index:10}
+.tabs button{flex:1;border:0;background:none;color:var(--muted);font-size:11px;padding:8px 0 6px;display:flex;flex-direction:column;align-items:center;gap:2px}
+.tabs button span{font-size:22px;filter:grayscale(1);opacity:.6}
+.tabs button.on{color:var(--accent);font-weight:600}.tabs button.on span{filter:none;opacity:1}
+.card{background:var(--card);border-radius:14px;padding:14px;margin:12px 0}
+.card h3{margin:0 0 8px;font-size:13px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.03em}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px}
+.stat{background:var(--card);border-radius:14px;padding:14px}
+.stat b{display:block;font-size:28px}
+.stat small{color:var(--muted)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.sub{font-size:12px;color:var(--muted)}
+.right{text-align:right}
+.qty{font-weight:700;font-size:18px}
+.zero{color:var(--err)}.low{color:var(--warn)}
+.in{color:var(--ok)}.sale{color:var(--err)}.adj{color:var(--muted)}
+button{font:inherit;cursor:pointer}
+.card button,dialog button{display:block;width:100%;padding:13px;border-radius:12px;border:0;background:var(--line);color:var(--text);font-weight:600;margin-top:8px}
+button.primary{background:var(--accent);color:#fff}
+button.danger{background:transparent;color:var(--err)}
+button.ghost{background:transparent;color:var(--muted)}
+.row button{width:auto;margin:0;padding:8px 12px}
+.banner{background:#fef3c7;color:#78350f;border-radius:14px;padding:12px 14px;margin:12px 0;display:flex;gap:10px;align-items:center}
+.banner span{flex:1}
+.banner button{border:0;border-radius:10px;padding:9px 12px;background:#78350f;color:#fff;font-weight:600}
+.seg{display:flex;background:var(--line);border-radius:10px;padding:3px;margin:6px 0 10px}
+.seg button{flex:1;border:0;background:none;padding:9px;border-radius:8px;font-weight:600;color:var(--text)}
+.seg button.on{background:var(--card);box-shadow:0 1px 3px rgba(0,0,0,.15);color:var(--mode)}
+.switch-row{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:15px}
+.switch-row input{width:22px;height:22px;margin:0}
+.switch-row small{color:var(--muted)}
+.cam{position:relative;width:100%;aspect-ratio:3/4;max-height:56vh;background:#000;border-radius:16px;overflow:hidden;border:3px solid var(--mode)}
+.cam video{width:100%;height:100%;object-fit:cover;display:block}
+.scanbox{position:absolute;left:6%;right:6%;top:30%;bottom:30%;border:2px solid #fff;border-radius:12px;box-shadow:0 0 0 999px rgba(0,0,0,.35);pointer-events:none}
+.scanbox::after{content:"";position:absolute;left:4%;right:4%;top:50%;height:2px;background:var(--mode);box-shadow:0 0 8px var(--mode);animation:laser 1.6s ease-in-out infinite}
+@keyframes laser{0%,100%{transform:translateY(-25px)}50%{transform:translateY(25px)}}
+.cam-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;color:#fff;background:rgba(0,0,0,.65)}
+.cam-tools{position:absolute;right:10px;bottom:10px;display:flex;gap:8px}
+.cam-tools button{width:46px;height:46px;border-radius:50%;border:0;background:rgba(0,0,0,.55);color:#fff;font-size:17px;font-weight:700}
+.cam-tools button.on{background:#facc15;color:#000}
+.manual{display:flex;gap:8px;margin-top:12px}
+input{font:inherit;width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--text)}
+input[type=checkbox]{width:auto}
+.manual button{border:0;border-radius:12px;padding:0 18px;background:var(--accent);color:#fff;font-weight:600}
+#search{margin:6px 0 4px}
+.list{background:var(--card);border-radius:14px;padding:0 14px;margin-top:8px}
+.list .row{cursor:pointer}
+.empty{color:var(--muted);text-align:center;padding:20px 10px}
+dialog{border:0;border-radius:20px 20px 0 0;padding:20px 18px calc(20px + env(safe-area-inset-bottom));width:100%;max-width:520px;margin:auto auto 0;background:var(--card);color:var(--text);max-height:90vh;overflow:auto}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+dialog h2{margin:0 0 4px}
+.code{font-family:ui-monospace,Menlo,monospace;color:var(--muted);margin-bottom:12px}
+.pname{font-size:20px;font-weight:700}
+.warn{color:var(--err);font-weight:600}
+dialog label{display:block;margin:12px 0 6px;font-weight:600}
+.stepper{display:flex;gap:8px;align-items:center}
+.stepper button{width:56px;height:52px;margin:0;font-size:24px;flex:none;padding:0}
+.stepper input{text-align:center;font-size:22px;font-weight:700}
+.toast{position:fixed;left:12px;right:12px;bottom:calc(78px + env(safe-area-inset-bottom));z-index:20;padding:14px 16px;border-radius:14px;color:#fff;font-weight:600;display:flex;align-items:center;gap:10px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.toast.ok{background:var(--ok)}.toast.err{background:var(--err)}
+.toast span{flex:1}
+.toast button{border:0;background:rgba(255,255,255,.25);color:#fff;padding:8px 12px;border-radius:10px;font-weight:700}
+.hint{font-size:13px;color:var(--muted);margin:6px 0 0}
+#sale-search{margin:6px 0 0}
+.list .row.picked .pn{font-weight:700;color:var(--accent)}
+.list .row.out{opacity:.45}
+.mini button:disabled{opacity:.3}
+.mini b{cursor:pointer}
+.row.picked .mini b{color:var(--accent)}
+.checkout{position:fixed;left:0;right:0;bottom:calc(57px + env(safe-area-inset-bottom));z-index:9;background:var(--card);border-top:1px solid var(--line);padding:10px 14px;display:flex;align-items:center;gap:8px;box-shadow:0 -4px 16px rgba(0,0,0,.08)}
+.checkout>div{flex:1;font-size:17px}
+.checkout button{border:0;border-radius:12px;padding:14px 16px;font-weight:700;font-size:16px}
+.checkout .primary{background:var(--accent);color:#fff}
+.checkout .ghostbtn{background:none;color:var(--muted);padding:14px 6px}
+body.has-cart{padding-bottom:calc(140px + env(safe-area-inset-bottom))}
+body.has-cart .toast{bottom:calc(140px + env(safe-area-inset-bottom))}
+.mini{display:flex;align-items:center;gap:6px}
+.mini button{width:40px;height:40px;border-radius:10px;border:0;background:var(--line);color:var(--text);font-size:20px;font-weight:700;padding:0;margin:0}
+.mini b{min-width:30px;text-align:center;font-size:18px}
+.cart-total{display:flex;justify-content:space-between;font-weight:700;padding:12px 0 2px;font-size:17px}
+button.big{padding:16px;font-size:18px}
+.row.click{cursor:pointer}
+.flash{animation:flash .6s}
+@keyframes flash{from{background:rgba(22,163,74,.25)}to{background:transparent}}
+.tabs button{font-size:10px}
+</style>
+</head>
+<body data-mode="stock">
+<header class="top"><h1 id="title">Özet</h1></header>
+
+<main>
+  <section id="tab-summary" class="tab active"></section>
+
+  <section id="tab-sale" class="tab">
+    <input id="sale-search" type="search" placeholder="Ürün adı ara">
+    <p class="hint" style="margin:6px 2px 0">Satılan ürünlerin adedini + ile işaretleyin, sonra “Satışı Tamamla”ya basın.</p>
+    <div id="sale-list"></div>
+    <div id="today-sales"></div>
+  </section>
+
+  <section id="tab-stock" class="tab">
+    <p class="hint" style="margin:0 0 10px">Gelen ürünün barkodunu okutun. Yeni ürünse adı sorulur, sonra adet girilir.</p>
+    <div class="cam-slot"></div>
+    <form class="manual"><input name="code" inputmode="numeric" placeholder="Barkodu elle gir" autocomplete="off"><button>Tamam</button></form>
+  </section>
+
+  <section id="tab-products" class="tab">
+    <input id="search" type="search" placeholder="Ürün adı veya barkod ara">
+    <div id="product-list"></div>
+  </section>
+
+  <section id="tab-backup" class="tab"></section>
+</main>
+
+<nav class="tabs">
+  <button data-tab="summary" class="on"><span>📊</span>Özet</button>
+  <button data-tab="sale"><span>🛒</span>Satış</button>
+  <button data-tab="stock"><span>📥</span>Stok Girişi</button>
+  <button data-tab="products"><span>📦</span>Ürünler</button>
+  <button data-tab="backup"><span>💾</span>Yedek</button>
+</nav>
+
+<div id="cam-holder" hidden>
+  <div class="cam" id="cam">
+    <video id="video" playsinline muted autoplay></video>
+    <div class="scanbox"></div>
+    <div class="cam-msg" id="cam-msg" hidden></div>
+    <div class="cam-tools">
+      <button id="zoom" hidden aria-label="Yakınlaştır">2×</button>
+      <button id="torch" hidden aria-label="Fener">🔦</button>
+    </div>
+  </div>
+</div>
+
+<dialog id="sheet"><div id="sheet-body"></div></dialog>
+<div id="checkout-bar" class="checkout" hidden>
+  <div><b id="co-count"></b><br><span class="sub" id="co-sub"></span></div>
+  <button class="ghostbtn" data-act="clear-cart">Temizle</button>
+  <button class="primary" data-act="checkout">Satışı Tamamla</button>
+</div>
+<div id="toast" class="toast" hidden></div>
+<input type="file" id="import-file" accept="application/json,.json" hidden>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
