@@ -48,5 +48,5 @@ Adresi **Safari** ile açın → Paylaş (□↑) → **Ana Ekrana Ekle**. Geris
 - Odaklamıyorsa biraz geri çekin; **2×** (yakınlaştırma) ve **🔦** (fener) düğmeleri telefon destekliyorsa görünür.
 
 ## Güncelleme
-Dosyaları değiştirirseniz `sw.js` içindeki `VERSION` değerini artırın (ör. depo-v5) ve Netlify'a yeniden sürükleyin.
+Dosyaları değiştirirseniz `sw.js` içindeki `VERSION` değerini artırın (ör. depo-v7) ve Netlify'a yeniden sürükleyin.
 Uygulama kapatılıp açıldığında yeni sürüme geçer; veriler silinmez.

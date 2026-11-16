@@ -60,17 +60,27 @@ function idbEach(store, fn) {
     req.onerror = () => rej(req.error);
   }));
 }
-function idbWrite(store, fn) {
+// Asla takılı kalmaz: hata, iptal veya 8 sn zaman aşımında sonuç döner
+function idbWrite(store, fn, timeout = 8000) {
   return db().then(d => new Promise((res, rej) => {
-    const tx = d.transaction(store, 'readwrite');
-    fn(tx.objectStore(store));
-    tx.oncomplete = () => res();
-    tx.onerror = () => rej(tx.error);
+    const timer = setTimeout(() => rej(new Error('zaman aşımı')), timeout);
+    const ok = () => { clearTimeout(timer); res(); };
+    const fail = e => { clearTimeout(timer); rej(e || new Error('kayıt iptal edildi')); };
+    try {
+      const tx = d.transaction(store, 'readwrite');
+      tx.oncomplete = ok;
+      tx.onerror = () => fail(tx.error);
+      tx.onabort = () => fail(tx.error);
+      fn(tx.objectStore(store));
+    } catch (e) { fail(e); }
   }));
 }
-const loadPhotos = () => idbEach('photos', (k, blob) => { photoURL[k] = URL.createObjectURL(blob); });
+// iPhone'da Blob'u doğrudan IndexedDB'ye yazmak takılabiliyor → ham bayt (ArrayBuffer) olarak saklanır
+const recToBlob = v => (v instanceof Blob ? v : new Blob([v.data], { type: v.type || 'image/jpeg' }));
+const loadPhotos = () => idbEach('photos', (k, v) => { try { photoURL[k] = URL.createObjectURL(recToBlob(v)); } catch {} });
 async function photoSet(code, blob) {
-  await idbWrite('photos', s => s.put(blob, code));
+  const data = await blob.arrayBuffer();
+  await idbWrite('photos', s => s.put({ type: blob.type || 'image/jpeg', data }, code));
   if (photoURL[code]) URL.revokeObjectURL(photoURL[code]);
   photoURL[code] = URL.createObjectURL(blob);
 }
@@ -88,8 +98,20 @@ const thumb = (code, cls = 'th') => photoURL[code]
   : `<span class="${cls} noimg">📦</span>`;
 const codeLabel = p => (p?.noBarcode ? 'Barkodsuz ürün' : esc(p?.barcode ?? ''));
 
+// Fotoğraf çekerken iPhone uygulamayı yeniden başlatırsa yazılanlar kaybolmasın
+const DRAFT_KEY = 'depo-taslak';
+function saveDraft(d) { try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...d, t: Date.now() })); } catch {} }
+function clearDraft() { try { localStorage.removeItem(DRAFT_KEY); } catch {} }
+function takeDraft() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+    clearDraft();
+    return d && Date.now() - d.t < 15 * 60 * 1000 ? d : null;
+  } catch { return null; }
+}
+
 // Kamerayla fotoğraf çek (veya galeriden seç), 600 px'e küçült
-function pickPhoto() {
+function pickPhoto(onFile) {
   return new Promise(resolve => {
     stopCamera(); // barkod kamerası açıkken telefon kamerası açılamayabilir
     const inp = $('#photo-input');
@@ -98,13 +120,14 @@ function pickPhoto() {
       inp.onchange = inp.oncancel = null;
       const f = inp.files[0];
       if (!f) return resolve(null);
+      onFile?.();
       try { resolve(await shrinkImage(f)); } catch { toast('Fotoğraf okunamadı', false); resolve(null); }
     };
     inp.oncancel = () => { inp.onchange = inp.oncancel = null; resolve(null); };
     inp.click();
   });
 }
-async function shrinkImage(file, max = 600) {
+async function shrinkImage(file, max = 640) {
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
@@ -112,7 +135,7 @@ async function shrinkImage(file, max = 600) {
     const c = document.createElement('canvas');
     c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-    return await new Promise((res, rej) => c.toBlob(b => (b ? res(b) : rej()), 'image/jpeg', 0.75));
+    return await new Promise((res, rej) => c.toBlob(b => (b ? res(b) : rej()), 'image/jpeg', 0.72));
   } finally { URL.revokeObjectURL(url); }
 }
 const blobToDataURL = b => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); });
@@ -306,6 +329,7 @@ function closeSheet() { if (sheet.open) sheet.close(); }
 sheet.addEventListener('close', () => {
   scanPaused = false;
   sheetHandler = null;
+  clearDraft();
   if (activeTab === 'stock' && document.visibilityState === 'visible') startCamera();
   if (history.state?.nav === 'sheet') { ignorePop = true; history.back(); }
 });
@@ -356,21 +380,26 @@ function openStockSheet(code, opts = {}) {
   const p = state.products[code];
   const noBarcode = p ? !!p.noBarcode : !!opts.noBarcode;
   let pending = opts.photo || null;
+  let saving = false;
   let html = `<form><h2>Stok Girişi</h2><div class="code">${noBarcode ? 'Barkodsuz ürün' : esc(code)}</div>
     ${photoBox(code, pending ? URL.createObjectURL(pending) : null, true)}`;
   if (p) html += `<div class="pname">${esc(p.name)}</div><div>Mevcut stok: <b>${p.qty}</b></div>`;
-  else html += `<label for="new-name">Yeni ürün — adı</label><input id="new-name" autocomplete="off" placeholder="Örn. Çay 1 kg">`;
+  else html += `<label for="new-name">Yeni ürün — adı</label><input id="new-name" autocomplete="off" placeholder="Örn. Çay 1 kg" value="${esc(opts.name || '')}">`;
   html += `<label for="amount">Eklenecek adet</label>
     <div class="stepper"><button type="button" data-step="-1">−</button>
-    <input id="amount" type="number" inputmode="numeric" value="1" min="1" max="99999">
+    <input id="amount" type="number" inputmode="numeric" value="${Number(opts.amount) || 1}" min="1" max="99999">
     <button type="button" data-step="1">+</button></div>
     <button type="submit" class="primary">Stoğa Ekle</button>
     <button type="button" class="ghost" data-act="close">Vazgeç</button></form>`;
 
   openSheet(html, async act => {
+    if (saving) return;
     if (act === 'photo') {
-      const b = await pickPhoto();
-      if (b) { pending = b; showPhotoInSheet(b); }
+      saveDraft({ code, noBarcode, name: $('#new-name', sheet)?.value || '', amount: $('#amount', sheet).value });
+      const label = $('#ph-empty', sheet);
+      const b = await pickPhoto(() => { label.hidden = false; label.textContent = '⏳ Fotoğraf işleniyor…'; });
+      label.textContent = '📷 Fotoğraf çek';
+      if (b) { pending = b; showPhotoInSheet(b); } else if (!$('#sheet-photo', sheet)?.getAttribute('src')) label.hidden = false;
       return;
     }
     if (act !== 'save') return;
@@ -378,18 +407,26 @@ function openStockSheet(code, opts = {}) {
     if (!(amount >= 1)) return toast('Geçerli bir adet girin', false);
     const name = p ? p.name : $('#new-name', sheet).value.trim();
     if (!name) { $('#new-name', sheet).focus(); return toast('Ürün adını yazın', false); }
-    if (pending) await photoSet(code, pending).catch(() => toast('Fotoğraf kaydedilemedi', false));
+    saving = true;
+    // Önce stoğu kaydet — fotoğraf ne olursa olsun ekleme yapılır
     const m = addStock(code, name, amount, noBarcode ? { noBarcode: true } : {});
     closeSheet();
     toast(`${name}: +${amount} • Stok: ${state.products[code].qty}`, true, m.id);
-  }, p ? null : '#new-name');
+    if (pending) {
+      photoSet(code, pending)
+        .then(() => render())
+        .catch(e => toast(`Ürün eklendi ama fotoğraf kaydedilemedi (${e.message}). Ürünler'den tekrar ekleyebilirsiniz.`, false));
+    }
+  }, p || opts.name ? null : '#new-name');
 }
 
 // Barkodu olmayan ürün: önce fotoğraf, sonra ad ve adet
 async function addWithoutBarcode() {
-  const b = await pickPhoto();
-  if (!b) { if (activeTab === 'stock') startCamera(); return; }
-  openStockSheet('F' + Date.now().toString(36).toUpperCase(), { photo: b, noBarcode: true });
+  const code = 'F' + Date.now().toString(36).toUpperCase();
+  saveDraft({ code, noBarcode: true });
+  const b = await pickPhoto(() => toast('⏳ Fotoğraf işleniyor…', true));
+  if (!b) { clearDraft(); if (activeTab === 'stock') startCamera(); return; }
+  openStockSheet(code, { photo: b, noBarcode: true });
 }
 
 // Kayıtlı ürünü fotoğrafından seçip stok ekle (barkodsuz ürünler için)
@@ -466,10 +503,12 @@ async function startCamera() {
   stream = s;
   video.srcObject = stream;
   await video.play().catch(() => {});
+  if (stream !== s) return; // bu arada kamera kapatıldıysa (ör. fotoğraf çekmeye geçildi) dur
   setupTrackTools();
   camMsg('Barkod okuyucu hazırlanıyor…');
   try { await getDetector(); camMsg(''); }
   catch { camMsg('Barkod okuyucu yüklenemedi. İlk açılışta internet gerekir; bağlantıyı kontrol edip sekmeyi yeniden açın. Elle giriş çalışır.'); return; }
+  if (stream !== s) return;
   if (!scanning) { scanning = true; scanLoop(); }
 }
 
@@ -483,6 +522,7 @@ function stopCamera() {
 }
 
 function setupTrackTools() {
+  if (!stream) return;
   track = stream.getVideoTracks()[0];
   const caps = track.getCapabilities?.() || {};
   $('#torch').hidden = !caps.torch;
@@ -730,9 +770,10 @@ function openProduct(barcode) {
     <button type="button" class="danger" data-act="delete">Ürünü sil</button>
   </form>`, async act => {
     if (act === 'photo') {
-      const b = await pickPhoto();
+      const b = await pickPhoto(() => toast('⏳ Fotoğraf işleniyor…', true));
       if (!b) return;
-      await photoSet(barcode, b);
+      try { await photoSet(barcode, b); toast('Fotoğraf kaydedildi', true); }
+      catch (e) { toast('Fotoğraf kaydedilemedi: ' + e.message, false); }
       render();
       openProduct(barcode);
       return;
@@ -769,7 +810,7 @@ async function renderBackup() {
   const snaps = ((await kvGet('snapshots')) || []).slice().reverse();
   const persisted = await navigator.storage?.persisted?.().catch(() => false);
   const saveHint = isIOS
-    ? 'Açılan menüde <b>“Dosyalara Kaydet” → iCloud Drive</b> seçin.'
+    ? 'Açılan menüde <b>“Dosyalara Kaydet” → iCloud Drive</b> seçin. Geri yüklerken <b>Dosyalar</b> ekranından bu dosyayı seçin (iCloud Drive veya Bu iPhone\'da klasörüne bakın).'
     : 'Açılan menüde <b>Google Drive</b>\'ı seçin; menü çıkmazsa dosya <b>İndirilenler</b> klasörüne kaydedilir, oradan Drive\'a yükleyin.';
   $('#tab-backup').innerHTML = `
     ${installPrompt && !isStandalone() ? `<div class="card"><h3>Uygulama</h3><button class="primary" data-act="install">📲 Telefona Yükle</button></div>` : ''}
@@ -807,14 +848,24 @@ function render() {
 }
 
 // ---------- Yedekleme ----------
+// Dosyayı telefonun paylaş menüsüyle kaydet (iPhone: Dosyalara Kaydet, Android: Drive vb.)
 async function shareOrDownload(filename, text, mime) {
-  const file = new File([text], filename, { type: mime });
-  if (navigator.canShare?.({ files: [file] })) {
-    try { await navigator.share({ files: [file] }); return true; }
-    catch (e) { if (e.name === 'AbortError') return false; }
+  if (navigator.share && navigator.canShare) {
+    // iPhone bazı dosya türlerini paylaşmaz; sırayla başka türleri dene
+    for (const type of [mime, 'text/plain', 'application/octet-stream']) {
+      const file = new File([text], filename, { type });
+      if (!navigator.canShare({ files: [file] })) continue;
+      try { await navigator.share({ files: [file] }); return true; }
+      catch (e) { if (e.name === 'AbortError') return false; break; }
+    }
+  }
+  if (isIOS && isStandalone()) {
+    // Ana ekran uygulamasında indirme, dosyayı sayfa olarak açıp uygulamayı kilitliyor
+    toast('Paylaşım menüsü açılamadı, tekrar deneyin', false);
+    return false;
   }
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(file);
+  a.href = URL.createObjectURL(new File([text], filename, { type: mime }));
   a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
@@ -823,19 +874,34 @@ async function shareOrDownload(filename, text, mime) {
 
 const stamp = () => { const d = new Date(); return `${dayKey()}-${pad(d.getHours())}${pad(d.getMinutes())}`; };
 
+// 1) Yedeği hazırla  2) Kullanıcı "Kaydet"e basınca paylaş menüsünü aç
+// (iPhone, paylaş menüsünü sadece doğrudan bir dokunuşla açtırıyor)
 async function exportBackup() {
   const photos = {};
   const blobs = [];
-  await idbEach('photos', (k, b) => blobs.push([k, b]));
+  await idbEach('photos', (k, v) => blobs.push([k, recToBlob(v)]));
   for (const [k, b] of blobs) photos[k] = await blobToDataURL(b);
   const data = JSON.stringify({ app: 'depo-takip', exportedAt: new Date().toISOString(), state, photos });
-  const ok = await shareOrDownload(`depo-yedek-${stamp()}.json`, data, 'application/json');
-  if (!ok) return;
-  state.lastExport = Date.now();
-  state.changedSinceExport = false;
-  persist(); render();
-  if (activeTab === 'backup') renderBackup();
-  toast('Yedek kaydedildi', true);
+  const filename = `depo-yedek-${stamp()}.json`;
+  const hint = isIOS
+    ? 'Açılan menüde <b>“Dosyalara Kaydet”</b> → <b>iCloud Drive</b> → <b>Kaydet</b>. Geri yüklerken dosyayı oradan seçeceksiniz.'
+    : 'Açılan menüde <b>Drive</b>\'ı seçin. Menü çıkmazsa dosya <b>İndirilenler</b> klasörüne kaydedilir.';
+  openSheet(`<h2>Yedek hazır</h2>
+    <div class="code">${esc(filename)}</div>
+    <div>${Object.keys(state.products).length} ürün • ${state.movements.length} hareket • ${blobs.length} fotoğraf • ${Math.max(1, Math.round(data.length / 1024))} KB</div>
+    <button type="button" class="primary big" data-act="share">📤 ${isIOS ? 'Dosyalara Kaydet' : 'Kaydet / Paylaş'}</button>
+    <p class="hint">${hint}</p>
+    <button type="button" class="ghost" data-act="close">Kapat</button>`, async act => {
+    if (act !== 'share') return;
+    const ok = await shareOrDownload(filename, data, 'application/json');
+    if (!ok) return;
+    state.lastExport = Date.now();
+    state.changedSinceExport = false;
+    persist(); render();
+    if (activeTab === 'backup') renderBackup();
+    closeSheet();
+    toast('Yedek kaydedildi', true);
+  });
 }
 
 async function replaceState(newState, label) {
@@ -923,6 +989,12 @@ document.addEventListener('click', async e => {
 (async function init() {
   try { await loadState(); } catch (e) { toast('Veriler okunamadı: ' + e.message, false); }
   try { await loadPhotos(); } catch {}
+  const draft = takeDraft();
+  if (draft) {
+    showTab('stock');
+    openStockSheet(draft.code, draft);
+    toast('Fotoğraf çekilirken uygulama yeniden başladı. Yazdıklarınız korundu, fotoğrafı tekrar çekin.', false);
+  }
   render();
   navigator.storage?.persist?.().catch(() => {});
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
