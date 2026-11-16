@@ -22,8 +22,12 @@ const isStandalone = () => matchMedia('(display-mode: standalone)').matches || n
 let dbPromise;
 function db() {
   return dbPromise ??= new Promise((res, rej) => {
-    const r = indexedDB.open('depo-takip', 1);
-    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    const r = indexedDB.open('depo-takip', 2);
+    r.onupgradeneeded = () => {
+      const d = r.result;
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos');
+    };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
   });
@@ -45,6 +49,73 @@ async function kvSet(key, val) {
     tx.onerror = () => rej(tx.error);
   });
 }
+
+// ---------- Ürün fotoğrafları (ayrı depoda, küçültülmüş JPEG) ----------
+const photoURL = {}; // barkod → ekranda gösterilecek adres
+
+function idbEach(store, fn) {
+  return db().then(d => new Promise((res, rej) => {
+    const req = d.transaction(store).objectStore(store).openCursor();
+    req.onsuccess = () => { const c = req.result; if (c) { fn(c.key, c.value); c.continue(); } else res(); };
+    req.onerror = () => rej(req.error);
+  }));
+}
+function idbWrite(store, fn) {
+  return db().then(d => new Promise((res, rej) => {
+    const tx = d.transaction(store, 'readwrite');
+    fn(tx.objectStore(store));
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  }));
+}
+const loadPhotos = () => idbEach('photos', (k, blob) => { photoURL[k] = URL.createObjectURL(blob); });
+async function photoSet(code, blob) {
+  await idbWrite('photos', s => s.put(blob, code));
+  if (photoURL[code]) URL.revokeObjectURL(photoURL[code]);
+  photoURL[code] = URL.createObjectURL(blob);
+}
+async function photoDel(code) {
+  await idbWrite('photos', s => s.delete(code));
+  if (photoURL[code]) { URL.revokeObjectURL(photoURL[code]); delete photoURL[code]; }
+}
+async function photoClearAll() {
+  await idbWrite('photos', s => s.clear());
+  for (const k in photoURL) { URL.revokeObjectURL(photoURL[k]); delete photoURL[k]; }
+}
+
+const thumb = (code, cls = 'th') => photoURL[code]
+  ? `<img class="${cls}" src="${photoURL[code]}" alt="" loading="lazy">`
+  : `<span class="${cls} noimg">📦</span>`;
+const codeLabel = p => (p?.noBarcode ? 'Barkodsuz ürün' : esc(p?.barcode ?? ''));
+
+// Kamerayla fotoğraf çek (veya galeriden seç), 600 px'e küçült
+function pickPhoto() {
+  return new Promise(resolve => {
+    stopCamera(); // barkod kamerası açıkken telefon kamerası açılamayabilir
+    const inp = $('#photo-input');
+    inp.value = '';
+    inp.onchange = async () => {
+      inp.onchange = inp.oncancel = null;
+      const f = inp.files[0];
+      if (!f) return resolve(null);
+      try { resolve(await shrinkImage(f)); } catch { toast('Fotoğraf okunamadı', false); resolve(null); }
+    };
+    inp.oncancel = () => { inp.onchange = inp.oncancel = null; resolve(null); };
+    inp.click();
+  });
+}
+async function shrinkImage(file, max = 600) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return await new Promise((res, rej) => c.toBlob(b => (b ? res(b) : rej()), 'image/jpeg', 0.75));
+  } finally { URL.revokeObjectURL(url); }
+}
+const blobToDataURL = b => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); });
 
 // ---------- Durum ----------
 // product:  { barcode, name, qty, createdAt }
@@ -87,9 +158,9 @@ function commit() {
 }
 
 // ---------- Stok işlemleri ----------
-function addStock(barcode, name, amount) {
+function addStock(barcode, name, amount, extra = {}) {
   let p = state.products[barcode];
-  if (!p) p = state.products[barcode] = { barcode, name, qty: 0, createdAt: Date.now() };
+  if (!p) p = state.products[barcode] = { barcode, name, qty: 0, createdAt: Date.now(), ...extra };
   p.qty += amount;
   const m = { id: uid(), type: 'in', barcode, name: p.name, amount, date: Date.now() };
   state.movements.push(m);
@@ -235,6 +306,7 @@ function closeSheet() { if (sheet.open) sheet.close(); }
 sheet.addEventListener('close', () => {
   scanPaused = false;
   sheetHandler = null;
+  if (activeTab === 'stock' && document.visibilityState === 'visible') startCamera();
   if (history.state?.nav === 'sheet') { ignorePop = true; history.back(); }
 });
 sheet.addEventListener('click', e => {
@@ -253,7 +325,7 @@ sheet.addEventListener('click', e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (!act) return;
   if (act === 'close') return closeSheet();
-  sheetHandler?.(act);
+  sheetHandler?.(act, e.target.closest('[data-act]'));
 });
 sheet.addEventListener('submit', e => { e.preventDefault(); sheetHandler?.('save'); });
 
@@ -264,9 +336,28 @@ function handleCode(raw) {
   if (activeTab === 'stock') { beep(true); openStockSheet(code); }
 }
 
-function openStockSheet(code) {
+function photoBox(code, pendingUrl, small = false) {
+  const url = pendingUrl || photoURL[code];
+  return `<div class="ph-big${small ? ' small' : ''}" data-act="photo">
+    <img id="sheet-photo" src="${url || ''}" alt=""${url ? '' : ' hidden'}>
+    <span id="ph-empty"${url ? ' hidden' : ''}>📷 Fotoğraf çek</span>
+    <span class="ph-edit"${url ? '' : ' hidden'}>📷 Değiştir</span></div>`;
+}
+function showPhotoInSheet(blob) {
+  const img = $('#sheet-photo', sheet);
+  if (!img) return;
+  img.src = URL.createObjectURL(blob);
+  img.hidden = false;
+  $('#ph-empty', sheet).hidden = true;
+  $('.ph-edit', sheet).hidden = false;
+}
+
+function openStockSheet(code, opts = {}) {
   const p = state.products[code];
-  let html = `<form><h2>Stok Girişi</h2><div class="code">${esc(code)}</div>`;
+  const noBarcode = p ? !!p.noBarcode : !!opts.noBarcode;
+  let pending = opts.photo || null;
+  let html = `<form><h2>Stok Girişi</h2><div class="code">${noBarcode ? 'Barkodsuz ürün' : esc(code)}</div>
+    ${photoBox(code, pending ? URL.createObjectURL(pending) : null, true)}`;
   if (p) html += `<div class="pname">${esc(p.name)}</div><div>Mevcut stok: <b>${p.qty}</b></div>`;
   else html += `<label for="new-name">Yeni ürün — adı</label><input id="new-name" autocomplete="off" placeholder="Örn. Çay 1 kg">`;
   html += `<label for="amount">Eklenecek adet</label>
@@ -276,16 +367,46 @@ function openStockSheet(code) {
     <button type="submit" class="primary">Stoğa Ekle</button>
     <button type="button" class="ghost" data-act="close">Vazgeç</button></form>`;
 
-  openSheet(html, act => {
+  openSheet(html, async act => {
+    if (act === 'photo') {
+      const b = await pickPhoto();
+      if (b) { pending = b; showPhotoInSheet(b); }
+      return;
+    }
     if (act !== 'save') return;
     const amount = parseInt($('#amount', sheet).value, 10);
     if (!(amount >= 1)) return toast('Geçerli bir adet girin', false);
     const name = p ? p.name : $('#new-name', sheet).value.trim();
     if (!name) { $('#new-name', sheet).focus(); return toast('Ürün adını yazın', false); }
-    const m = addStock(code, name, amount);
+    if (pending) await photoSet(code, pending).catch(() => toast('Fotoğraf kaydedilemedi', false));
+    const m = addStock(code, name, amount, noBarcode ? { noBarcode: true } : {});
     closeSheet();
     toast(`${name}: +${amount} • Stok: ${state.products[code].qty}`, true, m.id);
   }, p ? null : '#new-name');
+}
+
+// Barkodu olmayan ürün: önce fotoğraf, sonra ad ve adet
+async function addWithoutBarcode() {
+  const b = await pickPhoto();
+  if (!b) { if (activeTab === 'stock') startCamera(); return; }
+  openStockSheet('F' + Date.now().toString(36).toUpperCase(), { photo: b, noBarcode: true });
+}
+
+// Kayıtlı ürünü fotoğrafından seçip stok ekle (barkodsuz ürünler için)
+function openPickList() {
+  const prods = Object.values(state.products).sort((a, b) => a.name.localeCompare(b.name, 'tr'));
+  openSheet(`<h2>Ürün seç</h2>
+    <input id="pick-search" type="search" placeholder="Ürün adı ara" autocomplete="off">
+    <div class="grid">${prods.length ? prods.map(p => `<button type="button" class="tile" data-act="pick" data-b="${esc(p.barcode)}" data-name="${esc(p.name.toLocaleLowerCase('tr'))}">
+      ${thumb(p.barcode, 'tile-img')}<span class="tn">${esc(p.name)}</span><span class="sub">Stok: ${p.qty}</span></button>`).join('')
+      : '<div class="empty">Henüz ürün yok</div>'}</div>
+    <button type="button" class="ghost" data-act="close">Vazgeç</button>`, (act, el) => {
+    if (act === 'pick') openStockSheet(el.dataset.b);
+  });
+  $('#pick-search', sheet).addEventListener('input', e => {
+    const q = e.target.value.trim().toLocaleLowerCase('tr');
+    $$('.tile', sheet).forEach(t => (t.hidden = q && !t.dataset.name.includes(q)));
+  });
 }
 
 // ---------- Kamera ve barkod okuma ----------
@@ -452,7 +573,7 @@ function showTab(name, fromPop = false) {
 $('.tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b && b.dataset.tab !== activeTab) showTab(b.dataset.tab); });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') stopCamera();
-  else if (isScanTab(activeTab)) startCamera();
+  else if (isScanTab(activeTab) && !sheet.open) startCamera();
 });
 
 // ---------- Uygulama olarak yükleme (Android) ----------
@@ -529,7 +650,7 @@ function renderSale() {
   $('#sale-list').innerHTML = prods.length
     ? `<div class="list">${prods.map(p => {
         const n = cartQty(p.barcode), b = esc(p.barcode);
-        return `<div class="row${n ? ' picked' : ''}${p.qty === 0 ? ' out' : ''}"><div><span class="pn">${esc(p.name)}</span><br><span class="sub">${p.qty ? 'Stok: ' + p.qty : 'Stokta yok'}</span></div>
+        return `<div class="row${n ? ' picked' : ''}${p.qty === 0 ? ' out' : ''}"><div class="pl">${thumb(p.barcode)}<div><span class="pn">${esc(p.name)}</span><br><span class="sub">${p.qty ? 'Stok: ' + p.qty : 'Stokta yok'}</span></div></div>
           <div class="mini"><button data-cart="-1" data-b="${b}"${n ? '' : ' disabled'}>−</button><b data-setqty="${b}">${n}</b><button data-cart="1" data-b="${b}"${n >= p.qty ? ' disabled' : ''}>+</button></div></div>`;
       }).join('')}</div>`
     : `<div class="empty">${q ? 'Sonuç yok' : 'Henüz ürün yok. Ürünleri “Stok Girişi” sekmesinden barkod okutarak ekleyin.'}</div>`;
@@ -580,7 +701,7 @@ function renderProducts() {
     .sort((a, b) => a.name.localeCompare(b.name, 'tr'));
   const lim = state.settings.lowLimit;
   $('#product-list').innerHTML = prods.length
-    ? `<div class="list">${prods.map(p => `<div class="row" data-open="${esc(p.barcode)}"><div>${esc(p.name)}<br><span class="sub">${esc(p.barcode)}</span></div><div class="qty ${p.qty === 0 ? 'zero' : p.qty <= lim ? 'low' : ''}">${p.qty}</div></div>`).join('')}</div>`
+    ? `<div class="list">${prods.map(p => `<div class="row" data-open="${esc(p.barcode)}"><div class="pl">${thumb(p.barcode)}<div>${esc(p.name)}<br><span class="sub">${codeLabel(p)}</span></div></div><div class="qty ${p.qty === 0 ? 'zero' : p.qty <= lim ? 'low' : ''}">${p.qty}</div></div>`).join('')}</div>`
     : `<div class="empty">${q ? 'Sonuç yok' : 'Henüz ürün yok. “Stok Girişi” sekmesinden barkod okutun.'}</div>`;
 }
 $('#search').addEventListener('input', renderProducts);
@@ -592,7 +713,9 @@ function openProduct(barcode) {
   const sold = state.movements.filter(m => m.type === 'sale' && m.barcode === barcode).reduce((a, m) => a + m.amount, 0);
   const hist = state.movements.filter(m => m.barcode === barcode).slice(-30).reverse();
   openSheet(`<form>
-    <h2>${esc(p.name)}</h2><div class="code">${esc(p.barcode)}</div>
+    <h2>${esc(p.name)}</h2><div class="code">${codeLabel(p)}</div>
+    ${photoBox(barcode)}
+    ${photoURL[barcode] ? '<button type="button" class="ghost" data-act="del-photo" style="margin-top:0">Fotoğrafı kaldır</button>' : ''}
     <div>Kalan: <b>${p.qty}</b> • Toplam satılan: <b>${sold}</b></div>
     <label for="edit-name">Ürün adı</label><input id="edit-name" value="${esc(p.name)}" autocomplete="off">
     <label for="amount">Stok (sayım düzeltmesi)</label>
@@ -605,10 +728,26 @@ function openProduct(barcode) {
     <h3 style="margin-top:18px">Geçmiş</h3>
     ${hist.length ? hist.map(m => movementRow(m, false)).join('') : '<div class="empty">Hareket yok</div>'}
     <button type="button" class="danger" data-act="delete">Ürünü sil</button>
-  </form>`, act => {
+  </form>`, async act => {
+    if (act === 'photo') {
+      const b = await pickPhoto();
+      if (!b) return;
+      await photoSet(barcode, b);
+      render();
+      openProduct(barcode);
+      return;
+    }
+    if (act === 'del-photo') {
+      if (!confirm('Fotoğraf kaldırılsın mı?')) return;
+      await photoDel(barcode);
+      render();
+      openProduct(barcode);
+      return;
+    }
     if (act === 'delete') {
       if (!confirm(`"${p.name}" silinsin mi? Satış geçmişi korunur.`)) return;
       delete state.products[barcode];
+      photoDel(barcode).catch(() => {});
       state.cart = state.cart.filter(i => i.barcode !== barcode);
       commit(); closeSheet();
       toast('Ürün silindi', true);
@@ -685,7 +824,11 @@ async function shareOrDownload(filename, text, mime) {
 const stamp = () => { const d = new Date(); return `${dayKey()}-${pad(d.getHours())}${pad(d.getMinutes())}`; };
 
 async function exportBackup() {
-  const data = JSON.stringify({ app: 'depo-takip', exportedAt: new Date().toISOString(), state }, null, 1);
+  const photos = {};
+  const blobs = [];
+  await idbEach('photos', (k, b) => blobs.push([k, b]));
+  for (const [k, b] of blobs) photos[k] = await blobToDataURL(b);
+  const data = JSON.stringify({ app: 'depo-takip', exportedAt: new Date().toISOString(), state, photos });
   const ok = await shareOrDownload(`depo-yedek-${stamp()}.json`, data, 'application/json');
   if (!ok) return;
   state.lastExport = Date.now();
@@ -710,6 +853,12 @@ $('#import-file').addEventListener('change', async e => {
     const s = parsed.state ?? parsed;
     if (!s || typeof s.products !== 'object' || !Array.isArray(s.movements)) throw new Error();
     if (!confirm(`Yedekte ${Object.keys(s.products).length} ürün ve ${s.movements.length} hareket var. Telefondaki mevcut veriler bununla değiştirilecek (öncesi otomatik kopyalanır). Devam edilsin mi?`)) return;
+    if (parsed.photos && typeof parsed.photos === 'object') {
+      await photoClearAll();
+      for (const [k, url] of Object.entries(parsed.photos)) {
+        try { await photoSet(k, await (await fetch(url)).blob()); } catch {}
+      }
+    }
     await replaceState(s, 'Geri yükleme öncesi');
     toast('Yedek geri yüklendi', true);
   } catch {
@@ -744,6 +893,8 @@ document.addEventListener('click', async e => {
   if (act === 'export') exportBackup();
   else if (act === 'install') installApp();
   else if (act === 'checkout') checkout();
+  else if (act === 'nobarcode') addWithoutBarcode();
+  else if (act === 'pick-list') openPickList();
   else if (act === 'clear-cart') {
     if (confirm('İşaretlenen adetler sıfırlansın mı?')) { state.cart = []; persist(); renderSale(); }
   }
@@ -771,6 +922,7 @@ document.addEventListener('click', async e => {
 // ---------- Başlat ----------
 (async function init() {
   try { await loadState(); } catch (e) { toast('Veriler okunamadı: ' + e.message, false); }
+  try { await loadPhotos(); } catch {}
   render();
   navigator.storage?.persist?.().catch(() => {});
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

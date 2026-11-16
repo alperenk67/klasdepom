@@ -1,6 +1,6 @@
 // Uygulamayı internetsiz çalıştırmak için önbellek.
 // Uygulama dosyalarını değiştirince VERSION'ı artırın.
-const VERSION = 'depo-v3';
+const VERSION = 'depo-v4';
 const CDN_CACHE = 'depo-cdn';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
